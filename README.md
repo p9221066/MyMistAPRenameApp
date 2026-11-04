@@ -2,7 +2,7 @@
 
 Bulk-rename Juniper Mist access points from a CSV file, using the [`mistapi`](https://pypi.org/project/mistapi/) Python library.
 
-You give the script a CSV of **new name + MAC address + serial number**. For each row it finds the AP in your Mist org by MAC address and renames it. By default it only **previews** the changes; nothing is changed in Mist until you add `--apply` and confirm.
+You give the script a CSV of **new name + MAC address**. For each row it finds the AP in your Mist org by MAC address and renames it. By default it only **previews** the changes; nothing is changed in Mist until you add `--apply` and confirm.
 
 ---
 
@@ -65,23 +65,26 @@ pip install -r requirements.txt
 
 ## Preparing the CSV
 
-The CSV needs these columns (column names are not case-sensitive, and the column order doesn't matter):
+Columns are read **by position**, so what the header row calls them doesn't matter, but they must be in this order:
 
-| Column | Required | Description |
+| Position | Required | Description |
 |---|---|---|
-| `Name` | Yes | The **new** name to give the AP (64 characters max) |
-| `MAC Address` | Yes | The AP's MAC address, used to find it in Mist |
-| `Serial Number` | No (recommended) | Checked against the serial number in Mist so that a mistyped MAC can't rename the wrong AP |
+| 1st column | Yes | The **new** name to give the AP (64 characters max) |
+| 2nd column | Yes | The AP's MAC address, used to find it in Mist |
+
+Any further columns, such as a serial number, are ignored. Because the MAC alone decides which AP is renamed, a mistyped MAC that matches another AP in the org will rename that AP, so review the preview first.
+
+The header row is optional: the first row is skipped unless its 2nd column is a valid MAC address.
 
 MAC addresses can be written in any common format: `5c:5b:35:00:00:01`, `5C-5B-35-00-00-01`, `5c5b.3500.0001` or `5c5b35000001`.
 
 Example ([aps_example.csv](aps_example.csv)):
 
 ```csv
-Name,MAC Address,Serial Number
-LON-L1-AP01,5c:5b:35:00:00:01,A0123456789AB
-LON-L1-AP02,5c-5b-35-00-00-02,A0123456789AC
-LON-L2-AP01,5c5b35000003,
+Name,MAC Address
+LON-L1-AP01,5c:5b:35:00:00:01
+LON-L1-AP02,5c-5b-35-00-00-02
+LON-L2-AP01,5c5b35000003
 ```
 
 Excel works fine: save the sheet as **CSV UTF-8 (Comma delimited)**.
@@ -99,7 +102,7 @@ Example output:
 ```
 ROW  MAC                CURRENT NAME  NEW NAME     STATUS
 2    5c:5b:35:00:00:01  old1          LON-L1-AP01  rename
-3    5C-5B-35-00-00-02  old2          LON-L1-AP02  error: serial mismatch
+3    5C-5B-35-00-00-02  old2          LON-L1-AP02  error: AP not assigned to a site
 4    5c5b35000003       LON-L2-AP01   LON-L2-AP01  unchanged
 5    5c5b35000099                     LON-L2-AP04  error: MAC not found in Mist
 
@@ -114,7 +117,7 @@ Dry-run only. Re-run with --apply to make these changes.
 python mist_ap_rename.py aps.csv --report plan.csv
 ```
 
-`plan.csv` lists each row with its current name, new name, serial numbers, site and device IDs, and status.
+`plan.csv` lists each row with its current name, new name, serial number from Mist, site and device IDs, and status.
 
 ### 3. Apply the changes
 
@@ -134,7 +137,6 @@ The script shows the plan, then asks you to type `yes` before it renames anythin
 | `--report FILE` | Write the plan or results to a CSV file |
 | `--org-id ID` | Mist org ID. Found automatically if your token can see only one org; otherwise the script lists the orgs it can see. |
 | `--env-file FILE` | Read settings from a different file (default `.env`) |
-| `--no-serial-check` | Don't compare the CSV serial number with the one in Mist |
 
 ## Row statuses
 
@@ -149,7 +151,6 @@ The script shows the plan, then asks you to type `yes` before it renames anythin
 | `error: MAC repeated in CSV` | The same MAC appears on more than one row | Remove the duplicate |
 | `error: name repeated in CSV` | Two rows have the same new name | Make the names unique |
 | `error: MAC not found in Mist` | No AP with this MAC in the org inventory | Check the MAC and the org |
-| `error: serial mismatch` | The CSV serial number differs from Mist's | Check the row, or use `--no-serial-check` |
 | `error: AP not assigned to a site` | The AP is in the inventory but not at a site; Mist can only rename an AP once it's at a site | Assign it to a site first |
 | `failed: HTTP <code>` | Mist rejected the rename | See the log line; often the token lacks write permission |
 
@@ -166,5 +167,5 @@ Rows with an error are skipped and the rest are still processed. The script exit
 
 - **`401` / `403` errors**: the token is invalid, has expired, or doesn't have write access to the org.
 - **"Token has access to N orgs; pass --org-id"**: copy the org ID from the list the script prints and add `--org-id <id>`.
-- **"missing column(s)"**: check the CSV header row spelling (`Name`, `MAC Address`).
+- **Every row shows "invalid MAC"**: the columns are probably in the wrong order. They must be name, then MAC.
 - **Every row shows "MAC not found"**: check that `MIST_HOST` points to the right cloud and that you're using the right org.

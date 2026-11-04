@@ -2,10 +2,11 @@
 """
 Rename Juniper Mist access points from a CSV file using the mistapi library.
 
-The CSV must have these columns (header names are case-insensitive):
-    Name            new name to give the AP
-    MAC Address     AP MAC (any format: aa:bb:cc..., aa-bb-..., aabb.cc..., aabbcc...)
-    Serial Number   AP serial, used to double-check the match (optional per row)
+Columns are read by position, so the header text doesn't matter:
+    1st column      new name to give the AP
+    2nd column      AP MAC (any format: aa:bb:cc..., aa-bb-..., aabb.cc..., aabbcc...)
+Any further columns are ignored. The first row is treated as a header unless
+its 2nd column is a valid MAC address.
 
 For each row the script finds the AP in the org inventory by MAC address and
 renames it. It is a dry-run by default: it prints the plan only. Pass --apply
@@ -36,7 +37,6 @@ from mistapi.api.v1.self import self as mist_self
 from mistapi.api.v1.sites import devices as site_devices
 
 MAX_NAME_LEN = 64
-COL_NAME, COL_MAC, COL_SERIAL = "name", "mac address", "serial number"
 
 log = logging.getLogger("ap_rename")
 
@@ -55,23 +55,17 @@ def check(resp, what: str):
 
 
 def read_csv(path: str) -> list[dict]:
-    """Return rows as dicts with keys: row, name, mac, serial."""
+    """Return rows as dicts with keys: row, name, mac_raw, mac."""
+    rows = []
     with open(path, newline="", encoding="utf-8-sig") as fh:
-        reader = csv.DictReader(fh)
-        headers = {h.strip().lower(): h for h in (reader.fieldnames or []) if h}
-        missing = [c for c in (COL_NAME, COL_MAC) if c not in headers]
-        if missing:
-            sys.exit(f"{path}: missing column(s): {', '.join(missing)}. "
-                     f"Found: {', '.join(reader.fieldnames or [])}")
-        rows = []
-        for i, raw in enumerate(reader, start=2):  # row 1 is the header
-            name = (raw.get(headers[COL_NAME]) or "").strip()
-            mac_raw = (raw.get(headers[COL_MAC]) or "").strip()
-            serial = (raw.get(headers.get(COL_SERIAL, ""), "") or "").strip()
+        for i, cells in enumerate(csv.reader(fh), start=1):
+            name, mac_raw = ([c.strip() for c in cells[:2]] + ["", ""])[:2]
             if not name and not mac_raw:
                 continue  # skip blank lines
-            rows.append({"row": i, "name": name, "mac_raw": mac_raw,
-                         "mac": normalize_mac(mac_raw), "serial": serial})
+            if i == 1 and len(normalize_mac(mac_raw)) != 12:
+                log.info("Skipping header row: %s", ", ".join(cells))
+                continue
+            rows.append({"row": i, "name": name, "mac_raw": mac_raw, "mac": normalize_mac(mac_raw)})
     return rows
 
 
@@ -102,7 +96,7 @@ def get_ap_inventory(session, org_id: str) -> dict[str, dict]:
 # --------------------------------------------------------------------------- #
 # Planning / applying
 # --------------------------------------------------------------------------- #
-def build_plan(rows: list[dict], inventory: dict[str, dict], check_serial: bool) -> list[dict]:
+def build_plan(rows: list[dict], inventory: dict[str, dict]) -> list[dict]:
     mac_counts = Counter(r["mac"] for r in rows)
     name_counts = Counter(r["name"].lower() for r in rows)
 
@@ -110,10 +104,9 @@ def build_plan(rows: list[dict], inventory: dict[str, dict], check_serial: bool)
     for r in rows:
         dev = inventory.get(r["mac"])
         old_name = (dev or {}).get("name") or ""
-        mist_serial = (dev or {}).get("serial") or ""
         item = {
-            "row": r["row"], "mac": r["mac_raw"], "serial": r["serial"],
-            "mist_serial": mist_serial, "old_name": old_name, "new_name": r["name"],
+            "row": r["row"], "mac": r["mac_raw"], "serial": (dev or {}).get("serial") or "",
+            "old_name": old_name, "new_name": r["name"],
             "site_id": (dev or {}).get("site_id") or "", "device_id": (dev or {}).get("id") or "",
         }
 
@@ -129,8 +122,6 @@ def build_plan(rows: list[dict], inventory: dict[str, dict], check_serial: bool)
             status = "error: name repeated in CSV"
         elif not dev:
             status = "error: MAC not found in Mist"
-        elif check_serial and r["serial"] and r["serial"].upper() != mist_serial.upper():
-            status = "error: serial mismatch"
         elif not item["site_id"]:
             status = "error: AP not assigned to a site"
         elif r["name"] == old_name:
@@ -176,13 +167,11 @@ def apply_plan(session, plan: list[dict]) -> None:
 # Main
 # --------------------------------------------------------------------------- #
 def parse_args() -> argparse.Namespace:
-    ap = argparse.ArgumentParser(description="Rename Mist APs from a CSV (Name, MAC Address, Serial Number).",
+    ap = argparse.ArgumentParser(description="Rename Mist APs from a CSV (columns: name, MAC).",
                                  formatter_class=argparse.RawDescriptionHelpFormatter, epilog=__doc__)
-    ap.add_argument("csv_file", help="CSV with columns Name, MAC Address, Serial Number")
+    ap.add_argument("csv_file", help="CSV whose columns are, in order: name, MAC")
     ap.add_argument("--env-file", default=".env", help="File with MIST_HOST / MIST_APITOKEN (default: .env)")
     ap.add_argument("--org-id", help="Mist org ID (auto-detected if the token has a single org)")
-    ap.add_argument("--no-serial-check", action="store_true",
-                    help="Don't require the CSV serial to match the serial in Mist")
     ap.add_argument("--report", help="Write the plan/result to this CSV file")
     ap.add_argument("--apply", action="store_true", help="Actually rename the APs (otherwise dry-run)")
     ap.add_argument("--yes", action="store_true", help="Skip the confirmation prompt with --apply")
@@ -202,7 +191,7 @@ def main() -> int:
     session.login()
     org_id = resolve_org_id(session, args.org_id)
 
-    plan = build_plan(rows, get_ap_inventory(session, org_id), check_serial=not args.no_serial_check)
+    plan = build_plan(rows, get_ap_inventory(session, org_id))
 
     print()
     print_plan(plan)
